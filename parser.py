@@ -1,14 +1,43 @@
 import hashlib
 import json
-import requests
+# requests already imported above
 from openpyxl import Workbook
 from datetime import datetime
+import pandas as pd
 
 
 
 
 
 seen_uids = {}
+_debug_item_printed = False
+
+SUBCATEGORY_ID_MAP = {
+    # Одежда
+    "19387": "Пальто",
+    "21338": "Куртка",
+    "19967": "Шуба",
+    "19402": "Жилет",
+    # Обувь
+    "19401": "Ботинки",
+    "19740": "Кроссовки",
+    "19741": "Кеды",
+    "20063": "Сапоги",
+    "19759": "Тапки",
+    # Аксессуары
+    "19790": "Сумка",
+    "19537": "Ремни",
+    "20874": "Очки",
+    "19816": "Брелки",
+    "19060": "Перчатки",
+    "18843": "Шапки",
+    "19417": "Шляпы",
+    "18609": "Кепки",
+    "18377": "Украшения",
+}
+
+# Автоматически собираем все ID из SUBCATEGORY_ID_MAP для запроса к API
+section_to_parse = ",".join(SUBCATEGORY_ID_MAP.keys())
 
 #преобразует один товар (словарь item) в унифицированный JSON-словарь, берёт нужные поля, делает uid и проверяет дубликаты
 def map_tsum_product_to_json(item: dict) -> dict:
@@ -22,24 +51,27 @@ def map_tsum_product_to_json(item: dict) -> dict:
     uid = hashlib.md5(base_uid.encode()).hexdigest()
 
     if uid in seen_uids:
-        print("\n⚠️  Найден дубликат UID:", uid)
-        print("   Уже был:", seen_uids[uid])
-        print("   Новый  :", {"brand": brand, "name": name, "color": color})
+        print(f"
+⚠️  Найден дубликат UID: {uid}, товар '{(seen_uids[uid]['brand'] or '')} {(seen_uids[uid]['name'] or '')}' пропускается.")
+        return None # <--- Пропускаем дубликат
     else:
         seen_uids[uid] = {"brand": brand, "name": name, "color": color}
+
 
     # Фото (если меньше 2 фото — заполняем None)
     photos = item.get("photos", [])
     photo1 = photos[0]["middle"] if len(photos) > 0 else None
     photo2 = photos[1]["middle"] if len(photos) > 1 else None
 
-    # Цена — берем скидочную, если есть
+    # Цена — берем первую SKU и стараемся извлечь значение и валюту
     sku_list = item.get("skuList", [])
+    price = None
     if sku_list:
-        price = sku_list[0].get("price_original")
-        price = str(price) if price else None
-    else:
-        price = None
+        sku = sku_list[0]
+        price_value = sku.get("price") or sku.get("price_original") or sku.get("priceNumeric") or sku.get("price_value")
+        currency = sku.get("currency") or sku.get("price_currency") or sku.get("currency_code") or item.get("currency")
+        if price_value is not None:
+            price = f"{price_value} {currency}" if currency else str(price_value)
 
     # Ссылка на товар
     slug = item.get("slug")
@@ -48,11 +80,43 @@ def map_tsum_product_to_json(item: dict) -> dict:
     # Детали — краткое описание, если нет — SEO
     details = item.get("description_lit") or item.get("description_seo") or None
 
-    # Пол
-    gender = item.get("gender") or None
 
-    # Пока тип не определяем
-    typ = None
+    # Пол — нормализуем к 'm' / 'w'
+    raw_gender = item.get("gender") or ""
+    gender = None
+    if raw_gender:
+        g = str(raw_gender).lower()
+        if g == "male":
+            gender = "m"
+        elif g == "female":
+            gender = "w"
+        elif g == "unisex":
+            gender = "m"
+    
+    # Подкатегория — сначала пытаемся определить по ID (если пользователь заполнит SUBCATEGORY_ID_MAP),
+    # затем по ключевым словам в тексте (фолбэк).
+    detected_subcat = None
+
+    # Собираем возможные id-поля из item
+    item_ids = []
+    for key in ("section", "sectionId", "section_id", "categoryId", "category_id", "rubrics", "rubric", "rubricId", "rubric_id"):
+        val = item.get(key)
+        if not val:
+            continue
+        if isinstance(val, (list, tuple)):
+            for v in val:
+                if v is not None:
+                    item_ids.append(str(v))
+        else:
+            item_ids.append(str(val))
+
+    for iid in item_ids:
+        if iid in SUBCATEGORY_ID_MAP:
+            detected_subcat = SUBCATEGORY_ID_MAP[iid]
+            break
+
+    # Источник
+    source = "цум"
 
     return {
         "id": item.get("id"),
@@ -62,86 +126,83 @@ def map_tsum_product_to_json(item: dict) -> dict:
         "link": link,
         "brand": brand or None,
         "name": name or None,
+        "subcategory": detected_subcat,
+        "color": color,  # Добавляем цвет в выходной словарь
         "price": price,
         "details": details,
         "gender": gender,
-        "typ": typ
+        "source": source,
+        "typ": None,
+        "parsing_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S") # Добавляем дату парсинга
     }
 
-# with open("/Users/timowey/Desktop/raw.json", "r", encoding="utf-8") as f:
-#     data = json.load(f)  # data = список товаров
-#
-# mapped_products = [map_tsum_product_to_json(item) for item in data]
-
-# вывод (например, первые 2)
-# print(json.dumps(mapped_products[:10], indent=2, ensure_ascii=False))
 
 import requests
 
 url = "https://api.tsum.ru/v3/catalog/search"
 
-# headers = {
-#     "Accept": "application/json",
-#     "Accept-Language": "ru,en;q=0.9",
-#     "Connection": "keep-alive",
-#     "Content-Type": "application/json",
-#     "Origin": "https://www.tsum.ru",
-#     "Referer": "https://www.tsum.ru/",
-#     "Sec-Fetch-Dest": "empty",
-#     "Sec-Fetch-Mode": "cors",
-#     "Sec-Fetch-Site": "same-site",
-#     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 YaBrowser/25.8.0.0 Safari/537.36",
-#     "X-App-Platform": "web",
-#     "X-Client-City": "%7B%22fiasId%22%3A%220c5b2444-70a0-4932-980c-b4dc0d3f02b5%22%2C%22fulltitle%22%3A%22%D0%B3%20%D0%9C%D0%BE%D1%81%D0%BA%D0%B2%D0%B0%22%2C%22country%22%3A%22%D0%A0%D0%BE%D1%81%D1%81%D0%B8%D1%8F%22%2C%22region%22%3A%22%D0%B3%20%D0%9C%D0%BE%D1%81%D0%BA%D0%B2%D0%B0%22%2C%22city%22%3A%22%D0%9C%D0%BE%D1%81%D0%BA%D0%B2%D0%B0%22%7D",
-#     "X-Request-Id": "e17a7382-cd07-4164-9a9f-f8ea16eb5802",
-#     "X-Segment": '{"AutomerchML":"0"}',
-#     "X-Site-Region": "RU",
-#     "X-Store": "tsum",
-#     "X-Uid": "89393121-2a52-4f85-a738-1b9cfa53fdf8",
-#     "X-XID": "7ea725b0-64ff-4e8d-82c0-c4a904481ab4",
-#     "sec-ch-ua": '"Not)A;Brand";v="8", "Chromium";v="138", "YaBrowser";v="25.8", "Yowser";v="2.5"',
-#     "sec-ch-ua-mobile": "?0",
-#     "sec-ch-ua-platform": '"macOS"'
-# }
+
+
+
+
+
 
 headers = {
+
   "User-Agent": "...Chrome...",
+
   "Accept": "application/json",
+
   "Content-Type": "application/json",
+
   "Origin": "https://www.tsum.ru",
+
   "Referer": "https://www.tsum.ru/",
+
   "X-Store": "tsum",
+
 }
+
+
 
 cookies = {
+
     "xid": "7ea725b0-64ff-4e8d-82c0-c4a904481ab4",
+
     # ... остальные cookies можно добавить, но часто НЕ нужны
+
 }
+
+
 
 payload = {
-    "section": "19387,19974",
+
+    "section": section_to_parse, # Используем автоматически сгенерированную строку ID
+
     "sort": "date",
+
     "page": "4"
+
 }
 
-# Создаем Workbook
-wb = Workbook()
-ws = wb.active
-ws.title = "Товары"
 
-# Заголовки
-headers_row = ["ID", "UID", "Бренд", "Название", "Цвет", "Цена", "Фото 1", "Фото 2", "Ссылка", "Описание", "Пол", "Дата парсинга"]
-ws.append(headers_row)
 
 # Парсим все страницы
-section = "19387,19974"
+
 all_products = []
 
+
+
 for page in range(1, 100):
+
     payload = {
-        "section": section,
+
+        "section": section_to_parse, # Используем автоматически сгенерированную строку ID
+
         "sort": "date",
+
         "page": str(page)
+
     }
     
     response = requests.post(url, headers=headers, json=payload)
@@ -165,31 +226,25 @@ for page in range(1, 100):
         
         for item in items:
             product = map_tsum_product_to_json(item)
-            all_products.append(product)
+            if product: # <--- Добавляем проверку на None
+                all_products.append(product)
             
-            # Добавляем строку в Excel
-            ws.append([
-                product['id'],
-                product['uid'],
-                product['brand'],
-                product['name'],
-                item.get("colorConcrete", {}).get("title", ""),
-                product['price'],
-                product['photo1'],
-                product['photo2'],
-                product['link'],
-                product['details'],
-                product['gender'],
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ])
+
                 
     except json.JSONDecodeError:
         print(f"Ошибка парсинга JSON на странице {page}")
         break
 
+# Создаем DataFrame из всех продуктов
+df = pd.DataFrame(all_products)
+
+# Определяем порядок столбцов и переименовываем их для удобства
+df = df[["id", "uid", "brand", "name", "subcategory", "color", "price", "photo1", "photo2", "link", "details", "gender", "source", "parsing_date"]]
+df.columns = ["ID", "UID", "Бренд", "Название", "Подкатегория", "Цвет", "Цена", "Фото 1", "Фото 2", "Ссылка", "Описание", "Пол", "Источник", "Дата парсинга"]
+
 # Сохраняем в Excel
-filename = f"tsum_products_{section.replace(',', '_')}.xlsx"
-wb.save(filename)
+filename = "parsing v2.xlsx"
+df.to_excel(filename, index=False)
 print(f"\nВсего спарсено: {len(all_products)} товаров")
 print(f"Сохранено в: {filename}")
 
