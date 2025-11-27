@@ -1,17 +1,11 @@
 import hashlib
 import json
-# requests already imported above
 from openpyxl import Workbook
 from datetime import datetime
 import pandas as pd
 
 
-
-
-
 seen_uids = {}
-_debug_item_printed = False
-
 SUBCATEGORY_ID_MAP = {
     # Одежда
     "19387": "Пальто",
@@ -34,13 +28,56 @@ SUBCATEGORY_ID_MAP = {
     "19417": "Шляпы",
     "18609": "Кепки",
     "18377": "Украшения",
+    
 }
+'''
+SUBCATEGORY_ID_MAP = {
+    # Одежда
+    "19387": "Пальто",
+    "18777": "Пальто",
+    "18726": "Пальто",
+    "19068": "Куртка",
+    "18910": "Куртка",
+    "13771245": "Куртка",
+    "19967": "Шуба",
+    "18631": "Шуба",
+    "19402": "Жилет",
+    "18432": "Жилет",
+    # Обувь
+    "19401": "Ботинки",
+    "19740": "Кроссовки",
+    "19014": "Кроссовки",
 
-# Автоматически собираем все ID из SUBCATEGORY_ID_MAP для запроса к API
-section_to_parse = ",".join(SUBCATEGORY_ID_MAP.keys())
-
+    "20063": "Сапоги",
+    "18441": "Сапоги",
+    "21385": "Сапоги",
+    "19759": "Тапки",
+    "18961": "Тапки",
+    # Аксессуары
+    "19790": "Сумка",
+    "18561": "Сумка",
+    "18754": "Сумка",
+    "20588": "Сумка",
+    "19537": "Ремни",
+    "18808": "Ремни",
+    "20874": "Очки",
+    "18959": "Очки",
+    "18457": "Очки",
+    "21379": "Очки",
+    "19816": "Брелки",
+    "18716": "Брелки",
+    "19060": "Перчатки",
+    "21358": "Перчатки",
+    "18843": "Шапки",
+    "19417": "Шляпы",
+    "18609": "Кепки",
+    "18377": "Украшения",
+    "18378": "Украшения",
+    "18629": "Украшения",
+}
+'''
 #преобразует один товар (словарь item) в унифицированный JSON-словарь, берёт нужные поля, делает uid и проверяет дубликаты
-def map_tsum_product_to_json(item: dict) -> dict:
+def map_tsum_product_to_json(item: dict, category_name: str) -> dict:
     # Извлекаем данные
     brand = item.get("brand_name") or ""
     name = item.get("title") or ""
@@ -51,8 +88,7 @@ def map_tsum_product_to_json(item: dict) -> dict:
     uid = hashlib.md5(base_uid.encode()).hexdigest()
 
     if uid in seen_uids:
-        print(f"
-⚠️  Найден дубликат UID: {uid}, товар '{(seen_uids[uid]['brand'] or '')} {(seen_uids[uid]['name'] or '')}' пропускается.")
+        print(f"⚠️  Найден дубликат UID: {uid}, товар '{(seen_uids[uid]['brand'] or '')} {(seen_uids[uid]['name'] or '')}' пропускается.")
         return None # <--- Пропускаем дубликат
     else:
         seen_uids[uid] = {"brand": brand, "name": name, "color": color}
@@ -93,27 +129,8 @@ def map_tsum_product_to_json(item: dict) -> dict:
         elif g == "unisex":
             gender = "m"
     
-    # Подкатегория — сначала пытаемся определить по ID (если пользователь заполнит SUBCATEGORY_ID_MAP),
-    # затем по ключевым словам в тексте (фолбэк).
-    detected_subcat = None
-
-    # Собираем возможные id-поля из item
-    item_ids = []
-    for key in ("section", "sectionId", "section_id", "categoryId", "category_id", "rubrics", "rubric", "rubricId", "rubric_id"):
-        val = item.get(key)
-        if not val:
-            continue
-        if isinstance(val, (list, tuple)):
-            for v in val:
-                if v is not None:
-                    item_ids.append(str(v))
-        else:
-            item_ids.append(str(val))
-
-    for iid in item_ids:
-        if iid in SUBCATEGORY_ID_MAP:
-            detected_subcat = SUBCATEGORY_ID_MAP[iid]
-            break
+    # Категория теперь передается напрямую
+    detected_subcat = category_name
 
     # Источник
     source = "цум"
@@ -141,99 +158,62 @@ import requests
 
 url = "https://api.tsum.ru/v3/catalog/search"
 
-
-
-
-
-
-
 headers = {
-
   "User-Agent": "...Chrome...",
-
   "Accept": "application/json",
-
   "Content-Type": "application/json",
-
   "Origin": "https://www.tsum.ru",
-
   "Referer": "https://www.tsum.ru/",
-
   "X-Store": "tsum",
-
 }
-
-
 
 cookies = {
-
     "xid": "7ea725b0-64ff-4e8d-82c0-c4a904481ab4",
-
     # ... остальные cookies можно добавить, но часто НЕ нужны
-
-}
-
-
-
-payload = {
-
-    "section": section_to_parse, # Используем автоматически сгенерированную строку ID
-
-    "sort": "date",
-
-    "page": "4"
-
 }
 
 
 
 # Парсим все страницы
-
 all_products = []
 
-
-
-for page in range(1, 100):
-
-    payload = {
-
-        "section": section_to_parse, # Используем автоматически сгенерированную строку ID
-
-        "sort": "date",
-
-        "page": str(page)
-
-    }
-    
-    response = requests.post(url, headers=headers, json=payload)
-    print(f"Страница {page}: {response.status_code}")
-    
-    if response.status_code != 200:
-        break
-    
-    try:
-        data = response.json()
+for category_id, category_name in SUBCATEGORY_ID_MAP.items():
+    print(f"\n--- Парсинг категории: {category_name} (ID: {category_id}) ---")
+    for page in range(1, 200):
+        payload = {
+            "section": category_id,
+            "sort": "date",
+            "page": str(page)
+        }
         
-        # Если это список товаров, используем напрямую; если словарь, берём items
-        if isinstance(data, list):
-            items = data
-        else:
-            items = data.get('items', [])
+        response = requests.post(url, headers=headers, json=payload)
+        print(f"Страница {page}: {response.status_code}")
         
-        if not items:
-            print(f"Конец категории на странице {page}")
+        if response.status_code != 200:
+            print(f"Ошибка запроса на странице {page}, код: {response.status_code}. Переход к следующей категории.")
             break
         
-        for item in items:
-            product = map_tsum_product_to_json(item)
-            if product: # <--- Добавляем проверку на None
-                all_products.append(product)
+        try:
+            data = response.json()
             
-
-                
-    except json.JSONDecodeError:
-        print(f"Ошибка парсинга JSON на странице {page}")
-        break
+            # Если это список товаров, используем напрямую; если словарь, берём items
+            if isinstance(data, list):
+                items = data
+            else:
+                items = data.get('items', [])
+            
+            if not items:
+                print(f"Категория '{category_name}' закончилась на странице {page}.")
+                break
+            
+            for item in items:
+                product = map_tsum_product_to_json(item, category_name)
+                if product: # <--- Добавляем проверку на None
+                    all_products.append(product)
+                    
+        except json.JSONDecodeError:
+            print(f"Ошибка парсинга JSON на странице {page}. Переход к следующей категории.")
+            break
 
 # Создаем DataFrame из всех продуктов
 df = pd.DataFrame(all_products)
@@ -273,4 +253,75 @@ curl ^"https://api.tsum.ru/v3/catalog/search^" ^
   -H ^"sec-ch-ua-mobile: ?0^" ^
   -H ^"sec-ch-ua-platform: ^\^"Windows^\^"^" ^
   --data-raw ^"^{^\^"section^\^":^\^"19822^\^",^\^"page^\^":^\^"3^\^"^}^"
+'''
+
+
+'''
+{id: 13756765, modelId: 13835462, modelExtId: "7073859", codeVnd: "G052KT/FM2G4",…}
+
+
+
+additional
+: 
+{sizing: "", isClickAndCollectEnabled: false, hasAlternatives: true, isFitting: false, fittingType: "",…}
+brand
+: 
+{id: 165399, title: "Dolce & Gabbana", slug: "dolce_gabbana",…}
+category
+: 
+{id: 19387, title: "Пальто", titleLink: "Пальто", slug: "men-palto-19387"}
+codeVnd
+: 
+"G052KT/FM2G4"
+color
+: 
+{id: 661006, title: "Темно-серый", imageUrl: ""}
+id
+: 
+13756765
+images
+: 
+[{,…}, {,…}, {,…}, {,…}, {,…}]
+information
+: 
+[{id: "product", title: "О товаре",…}, {id: "sizes", title: "Размеры и посадка", description: "",…},…]
+isBuyable
+: 
+true
+modelExtId
+: 
+"7073859"
+modelId
+: 
+13835462
+offers
+: 
+[{id: 14675174, extId: "56246025",…}, {id: 14675010, extId: "56246026",…},…]
+productLine
+: 
+[]
+products
+: 
+[{id: 13756765, slug: "7073859-sherstyanoe-palto-dolce-gabbana-temno-seryi",…}]
+sizeTable
+: 
+{title: "Размеры мужской одежды", description: {title: "Российский размер", code: "RU"},…}
+slug
+: 
+"7073859-sherstyanoe-palto-dolce-gabbana-temno-seryi"
+tags
+: 
+[{id: 13052547, title: "TSUM COLLECT", slug: "tsum-collect"}]
+title
+: 
+"Шерстяное пальто"
+type
+: 
+"regular"
+video
+: 
+""
+view
+: 
+"noGroup"
 '''
